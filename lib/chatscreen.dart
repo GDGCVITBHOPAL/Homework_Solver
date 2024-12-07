@@ -1,14 +1,13 @@
 import 'dart:io';
-
+import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.imageFile});
-
   final File imageFile;
-
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
@@ -19,16 +18,81 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<Map<String, dynamic>> _messages = [];
   final TextEditingController _textController = TextEditingController();
   bool _loading = false;
+  int _retryCount = 0;
+  static const maxRetries = 3;
 
   @override
   void initState() {
     super.initState();
+    _initializeChat();
+  }
+
+  Future<void> _initializeChat() async {
     _model = GenerativeModel(
       model: 'gemini-1.5-flash-latest',
       apiKey: 'AIzaSyDzs3RHpBdo5q6JwtqxDlgg1BpSpAcMNRA',
     );
     _chat = _model.startChat();
-    _sendImage(widget.imageFile);
+    await _checkConnectivityAndSendImage();
+  }
+
+  Future<bool> _checkConnectivity() async {
+    final connectivityResult = await Connectivity().checkConnectivity();
+    return connectivityResult != ConnectivityResult.none;
+  }
+
+  Future<void> _checkConnectivityAndSendImage() async {
+    if (await _checkConnectivity()) {
+      await _sendImage(widget.imageFile);
+    } else {
+      _showNoInternetDialog();
+    }
+  }
+
+  void _showNoInternetDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('No Internet Connection'),
+        content:
+            const Text('Please check your internet connection and try again.'),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _checkConnectivityAndSendImage();
+            },
+            child: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _sendWithRetry(Future<void> Function() operation) async {
+    while (_retryCount < maxRetries) {
+      try {
+        await operation();
+        _retryCount = 0; // Reset counter on success
+        return;
+      } catch (e) {
+        _retryCount++;
+        if (_retryCount >= maxRetries) {
+          setState(() {
+            _messages.add({
+              'isUser': false,
+              'content':
+                  'Failed to connect. Please check your internet connection and try again.'
+            });
+            _loading = false;
+          });
+          break;
+        }
+        // Wait before retrying
+        await Future.delayed(Duration(seconds: _retryCount * 2));
+      }
+    }
   }
 
   Future<void> _sendImage(File imageFile) async {
@@ -37,7 +101,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages.add({'isUser': true, 'content': imageFile});
     });
 
-    try {
+    await _sendWithRetry(() async {
       final imageBytes = await imageFile.readAsBytes();
       final content = Content.multi([
         DataPart('image/png', imageBytes),
@@ -52,12 +116,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages.add({'isUser': false, 'content': text});
         _loading = false;
       });
-    } catch (e) {
-      setState(() {
-        _messages.add({'isUser': false, 'content': 'Error: $e'});
-        _loading = false;
-      });
-    }
+    });
   }
 
   Future<void> _sendMessage(String message) async {
@@ -69,7 +128,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _loading = true;
     });
 
-    try {
+    await _sendWithRetry(() async {
       final response = await _chat.sendMessage(Content.text(message));
       final text = response.text ?? 'No response from API.';
 
@@ -77,12 +136,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages.add({'isUser': false, 'content': text});
         _loading = false;
       });
-    } catch (e) {
-      setState(() {
-        _messages.add({'isUser': false, 'content': 'Error: $e'});
-        _loading = false;
-      });
-    }
+    });
   }
 
   Widget _buildMessage(Map<String, dynamic> message) {
